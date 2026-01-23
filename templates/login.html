@@ -35,8 +35,7 @@
                 const data = await response.json();
                 
                 if (response.ok) {
-                    localStorage.setItem('token', data.token);
-                    window.location.href = '/home';
+                    window.location.href = '/soundboard';
                 } else {
                     document.getElementById('error').textContent = data.error;
                 }

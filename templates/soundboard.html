@@ -128,13 +128,38 @@
       font-size: 0.85rem;
       color: color-mix(in srgb, canvastext 70%, canvas);
     }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+    }
+    header > div:first-child {
+      flex: 1;
+    }
+    header a {
+      padding: 0.5rem 1rem;
+      background: #666;
+      color: white;
+      text-decoration: none;
+      border-radius: 0.5rem;
+      font-size: 0.9rem;
+      transition: opacity 0.2s;
+      white-space: nowrap;
+    }
+    header a:hover {
+      opacity: 0.9;
+    }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>Soundboard</h1>
-      <p>Add short sound effects and control playback precisely.</p>
+      <div>
+        <h1>Soundboard</h1>
+        <p>Add short sound effects and control playback precisely.</p>
+      </div>
+      <a href="/settings">Settings</a>
     </header>
 
     <form id="sound-form">
@@ -143,8 +168,12 @@
         <input id="title" type="text" placeholder="e.g., Airhorn" required />
       </label>
       <label>
-        Sound file
-        <input id="file" type="file" accept="audio/*" required />
+        YouTube Link (optional)
+        <input id="yt-url" type="url" placeholder="https://youtube.com/watch?v=..." />
+      </label>
+      <label>
+        Sound file (if not using YouTube)
+        <input id="file" type="file" accept="audio/*" />
       </label>
       <button type="submit">Add sound</button>
     </form>
@@ -162,7 +191,6 @@
   </main>
 
   <script>
-    const STORAGE_KEY = "soundboard-meta";
     const DB_NAME = "SoundboardDB";
     const STORE_NAME = "sounds";
     let db;
@@ -170,6 +198,7 @@
 
     const form = document.getElementById("sound-form");
     const titleInput = document.getElementById("title");
+    const ytUrlInput = document.getElementById("yt-url");
     const fileInput = document.getElementById("file");
     const soundList = document.getElementById("sound-list");
     const emptyState = document.getElementById("empty-state");
@@ -179,37 +208,94 @@
     init();
 
     async function init() {
+      // Session authentication - server will handle redirection if not authenticated
       db = await openDB();
+      await loadSoundsFromBackend();
       renderSounds();
     }
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const title = titleInput.value.trim();
+      const ytUrl = ytUrlInput.value.trim();
       const file = fileInput.files[0];
-      if (!title || !file) return;
 
-      const id = crypto.randomUUID();
-      await saveBlob(id, file);
+      if (!title || (!ytUrl && !file)) {
+        alert("Please enter a title and either a YouTube URL or select a file");
+        return;
+      }
 
-      const meta = loadMeta();
-      meta.push({
-        id,
-        title,
-        type: file.type,
-        size: file.size,
-        addedAt: Date.now()
-      });
-      saveMeta(meta);
+      try {
+        let response;
+        if (ytUrl) {
+          // Send YouTube URL to backend
+          response = await fetch("/new_sound", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ title, yt_url: ytUrl })
+          });
+        } else {
+          // Send file to backend via base64
+          const fileData = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          });
 
-      form.reset();
-      renderSounds();
+          // Extract base64 from data URL (remove "data:audio/...;base64," prefix)
+          const base64String = fileData.split(',')[1];
+
+          response = await fetch("/new_sound", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              title,
+              audio_base64: base64String
+            })
+          });
+        }
+
+        if (!response.ok) {
+          const error = await response.json();
+          console.error('Server error:', error);
+          alert(`Error: ${error.error || "Failed to add sound"}`);
+          return;
+        }
+
+        const soundData = await response.json();
+
+        // Save to IndexedDB
+        const binaryString = atob(soundData.audio_base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: "audio/mpeg" });
+
+        await saveSound({
+          id: soundData.id,
+          title: soundData.title,
+          blob,
+          size: blob.size,
+          file_path: soundData.file_path
+        });
+
+        form.reset();
+        renderSounds();
+      } catch (error) {
+        console.error("Error:", error);
+        alert("Failed to add sound");
+      }
     });
 
     clearBtn.addEventListener("click", async () => {
       if (!confirm("Delete all stored sounds? This cannot be undone.")) return;
       await clearStore();
-      saveMeta([]);
       controllers.forEach((ctrl) => {
         ctrl.audio?.pause();
         if (ctrl.url) URL.revokeObjectURL(ctrl.url);
@@ -218,8 +304,41 @@
       renderSounds();
     });
 
+    async function loadSoundsFromBackend() {
+      try {
+        const response = await fetch("/api/sounds", {
+          method: "GET"
+        });
+
+        if (!response.ok) {
+          console.error("Failed to load sounds");
+          return;
+        }
+
+        const sounds = await response.json();
+        for (const soundData of sounds) {
+          const binaryString = atob(soundData.audio_base64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: "audio/mpeg" });
+
+          await saveSound({
+            id: soundData.id,
+            title: soundData.title,
+            blob,
+            size: blob.size,
+            file_path: soundData.file_path
+          });
+        }
+      } catch (error) {
+        console.error("Error loading sounds from backend:", error);
+      }
+    }
+
     async function renderSounds() {
-      const meta = loadMeta();
+      const meta = await getAllSounds();
       updateStats(meta);
       soundList.innerHTML = "";
 
@@ -259,7 +378,13 @@
       restartBtn.textContent = "Restart";
       restartBtn.addEventListener("click", () => restartSound(id));
 
-      actions.append(playBtn, restartBtn);
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.textContent = "Delete";
+      deleteBtn.style.background = "#e03232";
+      deleteBtn.addEventListener("click", () => deleteSound(id));
+
+      actions.append(playBtn, restartBtn, deleteBtn);
 
       const progressRow = document.createElement("div");
       progressRow.className = "progress-row";
@@ -430,6 +555,59 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(meta));
     }
 
+    async function getAllSounds() {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function deleteSound(id) {
+      if (!confirm("Delete this sound?")) return;
+
+      try {
+        // Delete from backend
+        const response = await fetch(`/delete_sound/${id}`, {
+          method: "DELETE"
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          alert(`Error: ${error.error || "Failed to delete sound"}`);
+          return;
+        }
+
+        // Delete from IndexedDB
+        await deleteSoundFromDB(id);
+
+        // Stop playback
+        const ctrl = controllers.get(id);
+        if (ctrl) {
+          ctrl.audio?.pause();
+          if (ctrl.url) URL.revokeObjectURL(ctrl.url);
+          controllers.delete(id);
+        }
+
+        renderSounds();
+      } catch (error) {
+        console.error("Error deleting sound:", error);
+        alert("Failed to delete sound");
+      }
+    }
+
+    function deleteSoundFromDB(id) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.delete(id);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
     function updateStats(meta) {
       const totalBytes = meta.reduce((sum, item) => sum + (item.size || 0), 0);
       const kb = totalBytes / 1024;
@@ -452,11 +630,17 @@
       });
     }
 
-    function saveBlob(id, file) {
+    function saveSound(soundData) {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
-        const entry = { id, blob: file };
+        const entry = {
+          id: soundData.id,
+          title: soundData.title,
+          blob: soundData.blob,
+          size: soundData.size,
+          file_path: soundData.file_path
+        };
         const request = store.put(entry);
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);

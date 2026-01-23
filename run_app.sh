@@ -1,0 +1,20 @@
+#!/bin/bash
+# Quick Start Guide for Soundboard Flask App
+
+echo "================================"
+echo "  Soundboard Flask App"
+echo "================================"
+echo ""
+echo "Running the app..."
+echo ""
+echo "Choose one of these options:"
+echo ""
+echo "Option 1 (Direct Python):"
+echo "  python app.py"
+echo ""
+echo "Option 2 (Flask CLI - Recommended):"
+echo "  flask run"
+echo ""
+echo "Then open: http://localhost:5000"
+echo ""
+echo "================================"
