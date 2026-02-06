@@ -158,106 +158,15 @@
     </header>
 
     <section class="section">
-      <h2>YouTube Authentication</h2>
-      
-      <div id="status" class="status authenticated">
-        <span id="status-text">✓ YouTube authenticated</span>
-      </div>
-
+      <h2>General settings</h2>
       <p>
-        Authenticate with YouTube to download age-restricted videos, region-locked content,
-        and videos with advanced protection. This requires you to log into your YouTube account.
+        There are no additional settings at this time.
       </p>
-
-      <button id="auth-btn" type="button">Login to YouTube</button>
-
-      <div id="message"></div>
-
-      <div class="loading" id="loading">
-        <div class="spinner"></div>
-        <p>Opening browser for YouTube login...</p>
-        <p style="color: color-mix(in srgb, canvastext 70%, canvas); font-size: 0.85rem;">
-          Log into YouTube in the browser window that appears
-        </p>
-      </div>
-
-      <div class="instructions">
-        <strong>What happens:</strong>
-        <ol>
-          <li>A browser window will open automatically</li>
-          <li>Log into your YouTube account</li>
-          <li>Authorization will be saved automatically</li>
-          <li>Close the browser or let it close itself</li>
-        </ol>
-      </div>
     </section>
   </main>
 
   <script>
-    const authBtn = document.getElementById('auth-btn');
-    const statusDiv = document.getElementById('status');
-    const statusText = document.getElementById('status-text');
-    const messageDiv = document.getElementById('message');
-    const loadingDiv = document.getElementById('loading');
-
-    // Check initial status
-    checkYouTubeStatus();
-
-    authBtn.addEventListener('click', async () => {
-      messageDiv.innerHTML = '';
-      loadingDiv.style.display = 'block';
-      authBtn.disabled = true;
-
-      try {
-        const response = await fetch('/api/youtube-login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-
-        const data = await response.json();
-        loadingDiv.style.display = 'none';
-
-        if (data.success) {
-          showMessage(data.message, 'success');
-          updateStatus(true);
-          // Refresh status after a moment
-          setTimeout(checkYouTubeStatus, 1000);
-        } else {
-          showMessage(data.message, 'error');
-        }
-      } catch (error) {
-        loadingDiv.style.display = 'none';
-        showMessage(`Error: ${error.message}`, 'error');
-      } finally {
-        authBtn.disabled = false;
-      }
-    });
-
-    async function checkYouTubeStatus() {
-      try {
-        const response = await fetch('/api/youtube-status');
-        const data = await response.json();
-        updateStatus(data.authenticated);
-      } catch (error) {
-        console.error('Failed to check YouTube status:', error);
-      }
-    }
-
-    function updateStatus(authenticated) {
-      if (authenticated) {
-        statusDiv.className = 'status authenticated';
-        statusText.textContent = '✓ YouTube authenticated';
-        authBtn.textContent = 'Update YouTube Login';
-      } else {
-        statusDiv.className = 'status not-authenticated';
-        statusText.textContent = '⚠ YouTube not authenticated';
-        authBtn.textContent = 'Login to YouTube';
-      }
-    }
-
-    function showMessage(text, type) {
-      messageDiv.innerHTML = `<div class="message ${type}">${text}</div>`;
-    }
+    // No settings script required currently.
   </script>
 </body>
 </html>

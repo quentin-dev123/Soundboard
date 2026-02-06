@@ -3,7 +3,7 @@ from models import Account, Sound
 from flask import request, jsonify, render_template, redirect, url_for
 from flask_login import login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
-from helpers import download_yt_audio, authenticate_youtube, is_youtube_authenticated
+# YouTube-specific helpers removed; helpers.py now contains only general helpers (if any)
 import base64
 import time
 import asyncio
@@ -38,35 +38,12 @@ def soundboard():
 @app.route('/settings')
 @login_required
 def settings():
-    youtube_authenticated = is_youtube_authenticated()
-    return render_template('settings.html', youtube_authenticated=youtube_authenticated)
+    # YouTube authentication support removed — render settings page without YouTube options
+    return render_template('settings.html')
 
-@app.route('/api/youtube-status', methods=['GET'])
-@login_required
-def youtube_status():
-    """Check YouTube authentication status."""
-    return jsonify({
-        'authenticated': is_youtube_authenticated(),
-        'message': 'YouTube authenticated' if is_youtube_authenticated() else 'YouTube not authenticated'
-    })
+# YouTube API endpoints removed
 
-@app.route('/api/youtube-login', methods=['POST'])
-@login_required
-def youtube_login():
-    """Start YouTube authentication process."""
-    try:
-        # Run async authentication in a new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(authenticate_youtube())
-        loop.close()
-        
-        return jsonify(result), 200 if result['success'] else 400
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Authentication failed: {str(e)}'
-        }), 500
+# YouTube authentication endpoint removed
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -131,38 +108,9 @@ def new_sound():
     user_id = current_user.id
     title = data.get('title', 'Untitled')
     
+    # YouTube URL uploads are not supported anymore
     if data.get('yt_url'):
-        try:
-            rel_path = download_yt_audio(data['yt_url'], user_id)
-            
-            sound = Sound(user_id=user_id, title=title, file_path=rel_path)
-            db.session.add(sound)
-            db.session.commit()
-            
-            # Read file and return COMPLETE sound
-            full_path = SOUNDS_DIR / rel_path
-            with open(full_path, 'rb') as f:
-                audio_data = f.read()
-            
-            return jsonify({
-                'id': sound.id,
-                'title': sound.title,
-                'file_path': sound.file_path,
-                'audio_base64': base64.b64encode(audio_data).decode('utf-8')
-            }), 201
-        except Exception as e:
-            error_msg = str(e)
-            # Provide helpful error messages for common YouTube issues
-            if 'Sign in to confirm' in error_msg or 'bot' in error_msg.lower():
-                return jsonify({
-                    'error': 'YouTube requires authentication. Please try a different video or use file upload instead. Some videos are protected from downloads.'
-                }), 400
-            elif 'video not found' in error_msg.lower() or 'not available' in error_msg.lower():
-                return jsonify({
-                    'error': 'Video not found or not available. Check the URL or try a different video.'
-                }), 400
-            else:
-                return jsonify({'error': f'YouTube download failed: {error_msg}'}), 400
+        return jsonify({'error': 'YouTube URL uploads are not supported. Please upload a file instead.'}), 400
     
     elif data.get('audio_base64'):
         try:
@@ -183,16 +131,41 @@ def new_sound():
             db.session.add(sound)
             db.session.commit()
             
+            # Return lightweight success response — do not send audio back to client here
             return jsonify({
                 'id': sound.id,
                 'title': sound.title,
                 'file_path': sound.file_path,
-                'audio_base64': audio_base64
+                'message': 'Sound saved'
             }), 201
         except Exception as e:
             return jsonify({'error': f'File upload failed: {str(e)}'}), 400
     
     return jsonify({'error': 'Either yt_url or audio_base64 required'}), 400
+
+
+@app.route('/api/sound/<int:sound_id>', methods=['GET'])
+@login_required
+def get_sound(sound_id):
+    """Return a single sound's metadata and base64 audio data."""
+    user_id = current_user.id
+    sound = Sound.query.filter_by(id=sound_id, user_id=user_id).first()
+    if not sound:
+        return jsonify({'error': 'Sound not found'}), 404
+
+    full_path = SOUNDS_DIR / sound.file_path
+    if not full_path.exists():
+        return jsonify({'error': 'Audio file missing on server'}), 404
+
+    with open(full_path, 'rb') as f:
+        audio_data = f.read()
+
+    return jsonify({
+        'id': sound.id,
+        'title': sound.title,
+        'file_path': sound.file_path,
+        'audio_base64': base64.b64encode(audio_data).decode('utf-8')
+    }), 200
 
 
 @app.route('/delete_sound/<int:sound_id>', methods=['DELETE'])

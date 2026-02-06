@@ -150,6 +150,23 @@
     header a:hover {
       opacity: 0.9;
     }
+
+    /* Drag handle and drop styles */
+    .drag-handle {
+      width: 20px;
+      height: 20px;
+      display: inline-block;
+      background: color-mix(in srgb, canvastext 30%, canvas);
+      border-radius: 4px;
+      margin-right: 0.6rem;
+      cursor: grab;
+    }
+    .sound-card.dragging {
+      opacity: 0.6;
+    }
+    .sound-card.over {
+      outline: 2px dashed color-mix(in srgb, canvastext 25%, canvas);
+    }
   </style>
 </head>
 <body>
@@ -167,12 +184,9 @@
         Title
         <input id="title" type="text" placeholder="e.g., Airhorn" required />
       </label>
+
       <label>
-        YouTube Link (optional)
-        <input id="yt-url" type="url" placeholder="https://youtube.com/watch?v=..." />
-      </label>
-      <label>
-        Sound file (if not using YouTube)
+        Sound file
         <input id="file" type="file" accept="audio/*" />
       </label>
       <button type="submit">Add sound</button>
@@ -193,12 +207,12 @@
   <script>
     const DB_NAME = "SoundboardDB";
     const STORE_NAME = "sounds";
+    const STORAGE_KEY = 'sound_meta';
     let db;
     const controllers = new Map();
 
     const form = document.getElementById("sound-form");
     const titleInput = document.getElementById("title");
-    const ytUrlInput = document.getElementById("yt-url");
     const fileInput = document.getElementById("file");
     const soundList = document.getElementById("sound-list");
     const emptyState = document.getElementById("empty-state");
@@ -211,82 +225,102 @@
       // Session authentication - server will handle redirection if not authenticated
       db = await openDB();
       await loadSoundsFromBackend();
+      // attempt to upload any locally added sounds
+      await syncPendingSounds();
       renderSounds();
+
+      // Attach drag/drop handlers to sound list (delegated)
+      soundList.addEventListener('dragstart', (e) => {
+        const handle = e.target.closest('.drag-handle');
+        const card = e.target.closest('.sound-card');
+        console.debug('dragstart event', { target: e.target, handle, card });
+        if (!card || !handle) {
+          // only start drag when handle is used
+          e.preventDefault();
+          console.debug('dragstart prevented: not on handle');
+          return;
+        }
+        e.dataTransfer.effectAllowed = 'move';
+        // store id explicitly for older browsers that expect it
+        try { e.dataTransfer.setData('text/plain', card.dataset.id); } catch (err) { /* ignore */ }
+        card.classList.add('dragging');
+      });
+
+      soundList.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const draggedEl = soundList.querySelector('.sound-card.dragging');
+        const target = e.target.closest('.sound-card');
+        console.debug('dragover', { draggedElId: draggedEl?.dataset.id, over: target?.dataset?.id });
+
+        // remove previous over classes
+        soundList.querySelectorAll('.sound-card.over').forEach(n => n.classList.remove('over'));
+
+        if (!draggedEl) return;
+        if (!target || target === draggedEl) {
+          // if no target or target is dragged element, append as last
+          if (soundList.lastElementChild !== draggedEl) soundList.appendChild(draggedEl);
+          return;
+        }
+
+        const rect = target.getBoundingClientRect();
+        const after = (e.clientY - rect.top) > rect.height / 2;
+
+        if (after) {
+          if (target.nextSibling !== draggedEl) target.parentNode.insertBefore(draggedEl, target.nextSibling);
+        } else {
+          if (target !== draggedEl.nextSibling) target.parentNode.insertBefore(draggedEl, target);
+        }
+
+        target.classList.add('over');
+      });
+
+      soundList.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        console.debug('drop event', { data: e.dataTransfer.getData('text/plain') });
+        // finalise position and save order
+        soundList.querySelectorAll('.sound-card.over').forEach(n => n.classList.remove('over'));
+        const draggedEl = soundList.querySelector('.sound-card.dragging');
+        if (draggedEl) draggedEl.classList.remove('dragging');
+        await updateOrderFromDOM();
+      });
+
+      soundList.addEventListener('dragend', (e) => {
+        const card = e.target.closest('.sound-card');
+        console.debug('dragend', { target: e.target, card });
+        if (card) card.classList.remove('dragging');
+        soundList.querySelectorAll('.sound-card.over').forEach(n => n.classList.remove('over'));
+      });
     }
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const title = titleInput.value.trim();
-      const ytUrl = ytUrlInput.value.trim();
       const file = fileInput.files[0];
 
-      if (!title || (!ytUrl && !file)) {
-        alert("Please enter a title and either a YouTube URL or select a file");
+      if (!title || !file) {
+        alert("Please enter a title and select a file");
         return;
       }
 
       try {
-        let response;
-        if (ytUrl) {
-          // Send YouTube URL to backend
-          response = await fetch("/new_sound", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ title, yt_url: ytUrl })
-          });
-        } else {
-          // Send file to backend via base64
-          const fileData = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(reader.error);
-            reader.readAsDataURL(file);
-          });
-
-          // Extract base64 from data URL (remove "data:audio/...;base64," prefix)
-          const base64String = fileData.split(',')[1];
-
-          response = await fetch("/new_sound", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              title,
-              audio_base64: base64String
-            })
-          });
-        }
-
-        if (!response.ok) {
-          const error = await response.json();
-          console.error('Server error:', error);
-          alert(`Error: ${error.error || "Failed to add sound"}`);
-          return;
-        }
-
-        const soundData = await response.json();
-
-        // Save to IndexedDB
-        const binaryString = atob(soundData.audio_base64);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        const blob = new Blob([bytes], { type: "audio/mpeg" });
-
-        await saveSound({
-          id: soundData.id,
-          title: soundData.title,
-          blob,
-          size: blob.size,
-          file_path: soundData.file_path
-        });
+        // File flow: save locally first, then upload in background
+        const localId = `local-${Date.now()}`;
+        await saveSound({ id: localId, title, blob: file, size: file.size, synced: false });
 
         form.reset();
         renderSounds();
+
+        // Start background upload, handle errors and mark entry if upload fails
+        uploadSound(localId).catch((err) => {
+          console.error('Upload failed for', localId, err);
+          // mark entry with sync_error flag
+          getEntry(localId).then((entry) => {
+            if (!entry) return;
+            entry.sync_error = true;
+            saveSound(entry).then(renderSounds);
+          });
+        });
       } catch (error) {
         console.error("Error:", error);
         alert("Failed to add sound");
@@ -329,7 +363,8 @@
             title: soundData.title,
             blob,
             size: blob.size,
-            file_path: soundData.file_path
+            file_path: soundData.file_path,
+            synced: true
           });
         }
       } catch (error) {
@@ -340,6 +375,14 @@
     async function renderSounds() {
       const meta = await getAllSounds();
       updateStats(meta);
+
+      // Cleanup any current controllers to avoid leaks
+      controllers.forEach((ctrl) => {
+        ctrl.audio?.pause();
+        if (ctrl.url) URL.revokeObjectURL(ctrl.url);
+      });
+      controllers.clear();
+
       soundList.innerHTML = "";
 
       if (!meta.length) {
@@ -355,15 +398,57 @@
         const card = createSoundCard(item);
         soundList.appendChild(card);
       });
+
+      // Apply saved order visually if needed
+      const order = loadOrder();
+      if (order && order.length) {
+        const nodes = Array.from(soundList.children);
+        const map = new Map(nodes.map(n => [n.dataset.id, n]));
+        soundList.innerHTML = '';
+        order.forEach(id => {
+          const node = map.get(String(id));
+          if (node) soundList.appendChild(node);
+        });
+        // append any missing nodes
+        nodes.forEach(n => { if (!soundList.contains(n)) soundList.appendChild(n); });
+      }
     }
 
-    function createSoundCard({ id, title, size }) {
+    function createSoundCard({ id, title, size, synced, sync_error }) {
       const card = document.createElement("article");
       card.className = "sound-card";
       card.dataset.id = id;
+      card.draggable = true;
+
+      const headingRow = document.createElement('div');
+      headingRow.style.display = 'flex';
+      headingRow.style.alignItems = 'center';
+
+      const handle = document.createElement('span');
+      handle.className = 'drag-handle';
+      handle.title = 'Drag to reorder';
+      handle.setAttribute('role', 'button');
+      handle.setAttribute('aria-label', 'Drag to reorder');
+      handle.style.userSelect = 'none';
+      handle.style.display = 'inline-flex';
+      handle.style.alignItems = 'center';
+      handle.style.justifyContent = 'center';
+      handle.style.fontSize = '14px';
+      handle.textContent = '≡';
+      handle.draggable = false;
 
       const heading = document.createElement("h3");
+      heading.style.margin = 0;
       heading.textContent = title;
+
+      const status = document.createElement('span');
+      status.style.marginLeft = '0.6rem';
+      status.style.fontSize = '0.8rem';
+      status.style.color = 'color-mix(in srgb, canvastext 60%, canvas)';
+      if (sync_error) status.textContent = '⚠️ upload failed';
+      else if (!synced) status.textContent = 'Uploading…';
+
+      headingRow.append(handle, heading, status);
 
       const actions = document.createElement("div");
       actions.className = "sound-actions";
@@ -408,7 +493,7 @@
       sizeLabel.className = "meta";
       sizeLabel.textContent = `Size: ${(size / 1024).toFixed(1)} KB`;
 
-      card.append(heading, actions, progressRow, sizeLabel);
+      card.append(headingRow, actions, progressRow, sizeLabel);
 
       controllers.set(id, {
         id,
@@ -555,11 +640,59 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(meta));
     }
 
+    const ORDER_KEY = 'sound_order';
+
+    function loadOrder() {
+      try {
+        return JSON.parse(localStorage.getItem(ORDER_KEY) || '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    function saveOrder(order) {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(order));
+    }
+
+    async function updateOrderFromDOM() {
+      const ids = Array.from(soundList.querySelectorAll('.sound-card')).map(n => n.dataset.id);
+      saveOrder(ids);
+    }
+
     async function getAllSounds() {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readonly");
         const store = tx.objectStore(STORE_NAME);
         const request = store.getAll();
+        request.onsuccess = () => {
+          const result = request.result || [];
+          const order = loadOrder();
+          // convert all ids to strings for consistent comparison
+          const orderMap = new Map(order.map((id, idx) => [String(id), idx]));
+          result.sort((a, b) => {
+            const ia = orderMap.has(String(a.id)) ? orderMap.get(String(a.id)) : Infinity;
+            const ib = orderMap.has(String(b.id)) ? orderMap.get(String(b.id)) : Infinity;
+            if (ia === ib) return 0;
+            return ia - ib;
+          });
+          // If some items are not in order, append them
+          const orderedIds = order.map(String);
+          const missing = result.filter(r => !orderedIds.includes(String(r.id))).map(r => String(r.id));
+          if (missing.length) {
+            const newOrder = order.concat(missing);
+            saveOrder(newOrder);
+          }
+          resolve(result);
+        };
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    function getEntry(id) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.get(id);
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
@@ -569,15 +702,16 @@
       if (!confirm("Delete this sound?")) return;
 
       try {
-        // Delete from backend
-        const response = await fetch(`/delete_sound/${id}`, {
-          method: "DELETE"
-        });
+        const entry = await getEntry(id);
 
-        if (!response.ok) {
-          const error = await response.json();
-          alert(`Error: ${error.error || "Failed to delete sound"}`);
-          return;
+        // If this sound has been synced to server, delete remotely first
+        if (entry && entry.synced) {
+          const response = await fetch(`/delete_sound/${id}`, { method: "DELETE" });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            alert(`Error: ${error.error || "Failed to delete sound"}`);
+            return;
+          }
         }
 
         // Delete from IndexedDB
@@ -591,6 +725,14 @@
           controllers.delete(id);
         }
 
+        // Remove from order if present
+        const order = loadOrder();
+        const idx = order.indexOf(String(id));
+        if (idx !== -1) {
+          order.splice(idx, 1);
+          saveOrder(order);
+        }
+
         renderSounds();
       } catch (error) {
         console.error("Error deleting sound:", error);
@@ -598,7 +740,7 @@
       }
     }
 
-    function deleteSoundFromDB(id) {
+    async function deleteSoundFromDB(id) {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
@@ -639,7 +781,9 @@
           title: soundData.title,
           blob: soundData.blob,
           size: soundData.size,
-          file_path: soundData.file_path
+          file_path: soundData.file_path,
+          synced: soundData.synced || false,
+          sync_error: soundData.sync_error || false
         };
         const request = store.put(entry);
         request.onsuccess = () => resolve();
@@ -665,6 +809,84 @@
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
       });
+    }
+
+    /* Helpers for background upload and syncing */
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function uploadSound(localId) {
+      const entry = await getEntry(localId);
+      if (!entry) throw new Error('Local entry missing');
+      if (entry.synced) return;
+
+      const dataUrl = await blobToBase64(entry.blob);
+      const base64String = dataUrl.split(',')[1];
+
+      const response = await fetch('/new_sound', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: entry.title, audio_base64: base64String })
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Upload failed');
+      }
+
+      const soundData = await response.json();
+      await migrateLocalToServerId(localId, soundData);
+    }
+
+    async function migrateLocalToServerId(localId, soundData) {
+      const entry = await getEntry(localId);
+      if (!entry) return;
+
+      const newEntry = {
+        id: soundData.id,
+        title: soundData.title || entry.title,
+        blob: entry.blob,
+        size: entry.size || (entry.blob ? entry.blob.size : 0),
+        file_path: soundData.file_path,
+        synced: true
+      };
+
+      await deleteSoundFromDB(localId);
+      await saveSound(newEntry);
+
+      const order = loadOrder();
+      const idx = order.indexOf(localId);
+      if (idx !== -1) {
+        order[idx] = newEntry.id;
+        saveOrder(order);
+      } else {
+        order.push(newEntry.id);
+        saveOrder(order);
+      }
+
+      if (controllers.has(localId)) {
+        const ctrl = controllers.get(localId);
+        controllers.delete(localId);
+        ctrl.id = newEntry.id;
+        controllers.set(newEntry.id, ctrl);
+      }
+
+      renderSounds();
+    }
+
+    async function syncPendingSounds() {
+      const all = await getAllSounds();
+      for (const entry of all) {
+        if (String(entry.id).startsWith('local-') || entry.synced === false) {
+          uploadSound(entry.id).catch(err => console.error('sync failed', entry.id, err));
+        }
+      }
     }
   </script>
 </body>
